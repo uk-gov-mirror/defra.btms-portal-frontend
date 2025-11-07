@@ -53,11 +53,19 @@ const mapCustomsDeclarations = (
   return (gmrCustoms).concat(gmrTransits)
 }
 
-const emitMetrics = (gmrCustoms, gmrTransits) => {
-  const knownMrns = gmrCustoms.reduce((knownMrnsCount, custom) => custom.isKnownMrn ? ++knownMrnsCount : knownMrnsCount, 0)
-    + gmrTransits.reduce((knownMrnsCount, custom) => custom.isKnownMrn ? ++knownMrnsCount : knownMrnsCount, 0)
+const mrnCounter = (counter, custom, shouldBeCounted) => {
+  if (custom.isKnownMrn === shouldBeCounted) {
+    ++counter
+  }
 
-  const unknownCustomsMrns = gmrCustoms.reduce((unknownMrnsCount, custom) => !custom.isKnownMrn ? ++unknownMrnsCount : unknownMrnsCount, 0)
+  return counter
+}
+
+const emitMetrics = (gmrCustoms, gmrTransits) => {
+  const knownMrns = gmrCustoms.reduce((knownMrnsCount, custom) => mrnCounter(knownMrnsCount, custom, true), 0)
+    + gmrTransits.reduce((knownMrnsCount, custom) => mrnCounter(knownMrnsCount, custom, true), 0)
+
+  const unknownCustomsMrns = gmrCustoms.reduce((unknownMrnsCount, custom) => mrnCounter(unknownMrnsCount, custom, false), 0)
 
   if (knownMrns > 0) {
     metricsCounter(metricsNames.GMR_KNOWN_MRNS, knownMrns)
