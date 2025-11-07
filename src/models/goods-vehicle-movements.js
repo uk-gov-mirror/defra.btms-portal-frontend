@@ -1,7 +1,8 @@
 import boom from '@hapi/boom'
 import { getCustomsDeclarationStatus } from './customs-declarations.js'
-import { ORDERED_CLEARANCE_DECISIONS } from './model-constants.js'
+import { metricsNames, ORDERED_CLEARANCE_DECISIONS } from './model-constants.js'
 import { paths, queryStringParams } from '../routes/route-constants.js'
+import { metricsCounter } from '../utils/metrics.js'
 
 const getBtmsDecision = (clearanceDecision) => {
   return ORDERED_CLEARANCE_DECISIONS.find(decisionCheck => {
@@ -41,13 +42,30 @@ const mapCustomsDeclarations = (
 ) => {
   const gmrCustoms = goodsVehicleMovement?.declarations?.customs?.map((custom) => {
     return mapGmrDeclaration(customsDeclarations, custom)
-  })
+  }) || []
 
   const gmrTransits = goodsVehicleMovement?.declarations?.transits?.map((transit) => {
     return mapGmrDeclaration(customsDeclarations, transit)
-  })
+  }) || []
 
-  return (gmrCustoms || []).concat(gmrTransits || [])
+  emitMetrics(gmrCustoms, gmrTransits)
+
+  return (gmrCustoms).concat(gmrTransits)
+}
+
+const emitMetrics = (gmrCustoms, gmrTransits) => {
+  const knownMrns = gmrCustoms.reduce((knownMrnsCount, custom) => custom.isKnownMrn ? ++knownMrnsCount : knownMrnsCount, 0)
+    + gmrTransits.reduce((knownMrnsCount, custom) => custom.isKnownMrn ? ++knownMrnsCount : knownMrnsCount, 0)
+
+  const unknownCustomsMrns = gmrCustoms.reduce((unknownMrnsCount, custom) => !custom.isKnownMrn ? ++unknownMrnsCount : unknownMrnsCount, 0)
+
+  if (knownMrns > 0) {
+    metricsCounter(metricsNames.GMR_KNOWN_MRNS, knownMrns)
+  }
+
+  if (unknownCustomsMrns > 0) {
+    metricsCounter(metricsNames.GMR_UNKNOWN_MRNS, unknownCustomsMrns)
+  }
 }
 
 export const mapGoodsVehicleMovements = ({
