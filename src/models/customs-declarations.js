@@ -15,7 +15,9 @@ import {
   NO_MATCH_DECISION_CODE,
   CDS_STATUSES,
   DECISION_MODE,
-  HIGHER_LEVEL_DECISION_CODE
+  HIGHER_LEVEL_DECISION_CODE,
+  QUANTITY_STATUSES,
+  reservationStatusDescriptions
 } from './model-constants.js'
 import { sortDescending } from './sort.js'
 import { paths, queryStringParams } from '../routes/route-constants.js'
@@ -23,7 +25,7 @@ import { paths, queryStringParams } from '../routes/route-constants.js'
 const documentReferenceRegex = /\d{7}[VR]?$/
 
 const extractDocumentReferenceId = (documentReference) => {
-  const match = documentReference.match(documentReferenceRegex)
+  const match = documentReference?.match(documentReferenceRegex) ?? null
   if (match === null) {
     return null
   }
@@ -196,7 +198,30 @@ const itemResultsContainPassiveDecisionCode = (clearanceDecision, commodity, dec
   })
 }
 
-const mapCommodity = (commodity, notificationStatuses, clearanceDecision) => {
+const buildReservationStatuses = (chedReservations = []) =>
+  chedReservations.reduce((statuses, { reservation }) => {
+    const chedId = extractDocumentReferenceId(reservation.chedId)
+    statuses[`${reservation.mrn}|${chedId}`] = reservationStatusDescriptions[reservation.status]
+    return statuses
+  }, {})
+
+const buildTracesChedIds = (cheds = []) =>
+  new Set(
+    cheds
+      .map(({ ched }) => ched?.exchangedDocument?.identifier)
+      .filter(Boolean)
+  )
+
+const getQuantityStatus = (tracesChedIds, reservationStatuses, mrn, documentReference, documentReferenceId) => {
+  if (!documentReference || !tracesChedIds.has(documentReference)) {
+    return undefined
+  }
+
+  return reservationStatuses[`${mrn}|${documentReferenceId}`] ?? QUANTITY_STATUSES.UNRESERVED
+}
+
+const mapCommodity = (commodity, context) => {
+  const { notificationStatuses, clearanceDecision, reservationStatuses, tracesChedIds, mrn } = context
   const clearanceDecisions =
     clearanceDecision?.results.filter(
       ({ itemNumber, mode }) => itemNumber === commodity.itemNumber && (mode == null || mode === DECISION_MODE.ACTIVE)
@@ -215,21 +240,21 @@ const mapCommodity = (commodity, notificationStatuses, clearanceDecision) => {
   const level3NoMatch = level3NoMatchWeight || level3NoMatchQuantity
 
   const decisions = clearanceDecisions.map((decision) => {
-    const documentReferenceId = decision.documentReference
-      ? extractDocumentReferenceId(decision.documentReference)
-      : null
-    const notificationStatus = documentReferenceId
-      ? notificationStatuses[documentReferenceId]
-      : null
     const relevantDocCodes =
       checkCodeToDocumentCodeMapping[decision.checkCode] || []
     const isIuuOutcome = relevantDocCodes.some((code) =>
       IUUDocumentCodes.includes(code)
     )
 
+    const documentReference = isIuuOutcome ? null : getDocumentReference(decision)
+    const documentReferenceId = extractDocumentReferenceId(documentReference)
+    const notificationStatus = documentReferenceId
+      ? notificationStatuses[documentReferenceId]
+      : null
+
     const isMatch = Boolean(
       decision.decisionCode &&
-        !noMatchInternalDecisionCodes.has(decision.internalDecisionCode)
+      !noMatchInternalDecisionCodes.has(decision.internalDecisionCode)
     )
 
     return {
@@ -252,8 +277,9 @@ const mapCommodity = (commodity, notificationStatuses, clearanceDecision) => {
         text: checkCodeToAuthorityNameMapping[decision.checkCode] || checkCodeToAuthorityMapping[decision.checkCode],
         value: checkCodeToAuthorityMapping[decision.checkCode]
       },
-      documentReference: isIuuOutcome ? null : getDocumentReference(decision),
+      documentReference,
       match: isIuuOutcome ? null : isMatch,
+      quantityStatus: getQuantityStatus(tracesChedIds, reservationStatuses, mrn, documentReference, documentReferenceId),
       level2NoMatch,
       level3NoMatch,
       level3NoMatchWeight,
@@ -269,11 +295,17 @@ const mapCommodity = (commodity, notificationStatuses, clearanceDecision) => {
   }
 }
 
-const mapCustomsDeclaration = (declaration, notificationStatuses, goodsVehicleMovements) => {
+const mapCustomsDeclaration = (declaration, context) => {
   const { clearanceRequest, clearanceDecision, finalisation } = declaration
+  const { goodsVehicleMovements, tracesChedIds } = context
   const updated = format(declaration.updated, DATE_FORMAT)
+  const commodityContext = {
+    ...context,
+    clearanceDecision,
+    mrn: declaration.movementReferenceNumber
+  }
   const commodities = clearanceRequest.commodities.map((commodity) =>
-    mapCommodity(commodity, notificationStatuses, clearanceDecision)
+    mapCommodity(commodity, commodityContext)
   )
 
   commodities.forEach(commodity => {
@@ -284,6 +316,12 @@ const mapCustomsDeclaration = (declaration, notificationStatuses, goodsVehicleMo
 
   const status = getCustomsDeclarationStatus(finalisation, clearanceDecision)
   const open = getCustomsDeclarationOpenState(finalisation)
+
+  const hasTracesChed = commodities.some(commodity =>
+    commodity.decisions.some(({ documentReference }) =>
+      tracesChedIds.has(documentReference)
+    )
+  )
 
   const relatedGoodsVehicleMovement = goodsVehicleMovements?.find(gvm =>
     gvm.gmr?.declarations?.customs?.some(customs => customs.id.toLowerCase() === declaration.movementReferenceNumber.toLowerCase())
@@ -299,6 +337,7 @@ const mapCustomsDeclaration = (declaration, notificationStatuses, goodsVehicleMo
     updated,
     open,
     finalState: finalisation?.finalState,
+    hasTracesChed,
     commodities
   }
 }
@@ -310,7 +349,9 @@ const isSearchTermMatch = (searchTerm, customsDeclaration) =>
 export const mapCustomsDeclarations = ({
   customsDeclarations,
   importPreNotifications,
-  goodsVehicleMovements
+  goodsVehicleMovements,
+  cheds = [],
+  chedReservations
 }, searchTerm) => {
   const notificationStatuses = importPreNotifications.reduce(
     (statuses, { importPreNotification }) => {
@@ -321,7 +362,11 @@ export const mapCustomsDeclarations = ({
     {}
   )
 
+  const reservationStatuses = buildReservationStatuses(chedReservations)
+  const tracesChedIds = buildTracesChedIds(cheds)
+  const context = { notificationStatuses, goodsVehicleMovements, reservationStatuses, tracesChedIds }
+
   return customsDeclarations.map((declaration) =>
-    mapCustomsDeclaration(declaration, notificationStatuses, goodsVehicleMovements)
+    mapCustomsDeclaration(declaration, context)
   ).sort(sortDescending(searchTerm, isSearchTermMatch))
 }
